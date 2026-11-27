@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - pinterest-kobo/pastas.txt
+      - pastas.txt
 
 permissions:
   contents: write
@@ -17,9 +17,6 @@ jobs:
   atualizar:
     runs-on: ubuntu-latest
     timeout-minutes: 300
-    defaults:
-      run:
-        working-directory: pinterest-kobo
     steps:
       - uses: actions/checkout@v4
 
