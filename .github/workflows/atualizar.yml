@@ -25,7 +25,7 @@ jobs:
           python-version: "3.12"
 
       - name: Instalar ferramentas
-        run: pip install gallery-dl pillow
+        run: pip install gallery-dl pillow pillow-heif
 
       - name: Baixar pins novos e gerar o site
         run: python scripts/atualizar.py
