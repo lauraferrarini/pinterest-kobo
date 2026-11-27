@@ -1,4 +1,11 @@
-"""Gera o site leve (pra Kobo) a partir das fotos em site/fotos/."""
+"""Gera o site leve (pra Kobo) a partir das fotos em site/fotos/.
+
+Todas as páginas são pastas com index.html (endereços terminando em /),
+porque o navegador da Kobo não segue o redirecionamento que o Cloudflare
+faz em endereços terminados em .html.
+As versões pra Kobo (mini, tela, zoom) recebem um realce de cor; as fotos
+originais em site/fotos/ não são alteradas.
+"""
 import html
 import os
 import re
@@ -8,7 +15,7 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import quote
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageEnhance, ImageOps
 
 try:  # fotos HEIC (formato do iPhone)
     from pillow_heif import register_heif_opener
@@ -23,7 +30,14 @@ FOTOS = SITE / "fotos"
 POR_PAGINA = 30                 # miniaturas por página da grade
 MINI = (360, 480)               # miniatura cortada em 3:4
 TELA = (1264, 1680)             # tela da Kobo Libra Colour
+ZOOM = (2000, 2000)             # versão ampliada (só criada se a original for maior que a tela)
 EXTENSOES = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".heif"}
+
+# Realce pra tela da Kobo (só nas versões do site; a foto original não muda).
+# 1.0 / 0 = sem mudança. Mudou aqui? Na próxima rodada todas as versões são refeitas.
+SATURACAO = 1.35                # mais cor
+PRETOS = 14                     # sombras mais escuras: tons até esse nível (0-255) viram preto
+CONTRASTE = 1.08                # um pouco mais de contraste
 
 CSS = """
 body{margin:0;padding:10px 12px 30px;background:#fff;color:#000;font-family:sans-serif;font-size:20px}
@@ -41,8 +55,11 @@ h1{font-size:26px;margin:8px 0 12px}
 .grade a{display:inline-block;width:33.33%;padding:4px;box-sizing:border-box}
 .grade img{width:100%;height:auto;display:block;border:1px solid #000}
 .foto{text-align:center}
-.foto img{max-width:100%;max-height:82vh;height:auto}
+.foto img{max-width:100%;max-height:1500px;height:auto}
+.zoom{overflow:auto}
+.zoom img{width:200%;max-width:none;height:auto;display:block}
 .info{text-align:center;font-size:16px;margin:6px 0}
+.pequeno{text-align:center;font-size:16px;margin:16px 0}
 .vazio{padding:30px 0}
 """
 
@@ -83,6 +100,11 @@ def link(de_pagina, para, pasta=False):
     return rel
 
 
+def link_pagina(de, alvo):
+    """Link pra pasta da página (termina em /), nunca pra um .html."""
+    return link(de, alvo.parent, pasta=True)
+
+
 def esc(t):
     return html.escape(str(t), quote=True)
 
@@ -101,6 +123,8 @@ def escrever(caminho, texto):
     caminho.write_text(texto, encoding="utf-8")
 
 
+# ---------- imagens pra Kobo ----------
+
 def abrir_rgb(origem):
     im = Image.open(origem)
     im.seek(0)
@@ -113,14 +137,36 @@ def abrir_rgb(origem):
     return im.convert("RGB")
 
 
+def realce(im):
+    if PRETOS:
+        escala = 255 / (255 - PRETOS)
+        im = im.point(lambda v: 0 if v <= PRETOS else min(255, round((v - PRETOS) * escala)))
+    if CONTRASTE != 1:
+        im = ImageEnhance.Contrast(im).enhance(CONTRASTE)
+    if SATURACAO != 1:
+        im = ImageEnhance.Color(im).enhance(SATURACAO)
+    return im
+
+
+def maior_que_tela(caminho):
+    try:
+        with Image.open(caminho) as im:
+            w, h = im.size
+    except Exception:
+        return False
+    return w > TELA[0] or h > TELA[1]
+
+
 def gerar_versoes(item):
     orig = item["original"]
-    precisa = [d for d in (item["mini"], item["tela"])
+    item["tem_zoom"] = item["zoom"].exists() or maior_que_tela(orig)
+    alvos = [item["mini"], item["tela"]] + ([item["zoom"]] if item["tem_zoom"] else [])
+    precisa = [d for d in alvos
                if not d.exists() or d.stat().st_mtime < orig.stat().st_mtime]
     if not precisa:
         return True
     try:
-        im = abrir_rgb(orig)
+        im = realce(abrir_rgb(orig))
     except Exception as e:
         print(f"  ignorando {orig.relative_to(SITE)}: {e}")
         return False
@@ -132,8 +178,15 @@ def gerar_versoes(item):
         t = im.copy()
         t.thumbnail(TELA, Image.LANCZOS)
         t.save(item["tela"], "JPEG", quality=85, optimize=True)
+    if item["zoom"] in precisa:
+        item["zoom"].parent.mkdir(parents=True, exist_ok=True)
+        z = im.copy()
+        z.thumbnail(ZOOM, Image.LANCZOS)
+        z.save(item["zoom"], "JPEG", quality=82, optimize=True)
     return True
 
+
+# ---------- leitura das pastas ----------
 
 def ler_album(dir_fotos, caminho_slug):
     itens = []
@@ -144,6 +197,7 @@ def ler_album(dir_fotos, caminho_slug):
                 "original": f,
                 "mini": SITE / "mini" / caminho_slug / f"{f.stem}.jpg",
                 "tela": SITE / "tela" / caminho_slug / f"{f.stem}.jpg",
+                "zoom": SITE / "zoom" / caminho_slug / f"{f.stem}.jpg",
             })
     itens.sort(key=lambda i: chave_ordem(i["stem"]))
     return itens
@@ -175,18 +229,23 @@ def ler_pastas():
     return pastas
 
 
+# ---------- páginas ----------
+
 def caminho_grade(album, n):
     base = SITE / "p" / album["url"]
-    return base / ("index.html" if n == 1 else f"{n}.html")
+    return base / ("index.html" if n == 1 else f"pag{n}/index.html")
 
 
 def caminho_foto(album, item):
-    return SITE / "v" / album["url"] / f"{item['stem']}.html"
+    return SITE / "v" / album["url"] / item["stem"] / "index.html"
+
+
+def caminho_zoom(album, item):
+    return SITE / "z" / album["url"] / item["stem"] / "index.html"
 
 
 def link_grade(de, album, n):
-    alvo = caminho_grade(album, n)
-    return link(de, alvo.parent, pasta=True) if n == 1 else link(de, alvo)
+    return link_pagina(de, caminho_grade(album, n))
 
 
 def bloco_pastas(de, lista, url_de):
@@ -219,7 +278,7 @@ def paginar(album, titulo, topo_html, extra_primeira=None):
         grade = ['<div class="grade">']
         for it in fatia:
             grade.append(
-                f'<a href="{link(pag, caminho_foto(album, it))}">'
+                f'<a href="{link_pagina(pag, caminho_foto(album, it))}">'
                 f'<img src="{link(pag, it["mini"])}" width="{MINI[0]}" height="{MINI[1]}" alt=""></a>')
         grade.append("</div>")
         corpo = (topo_html(pag) + f"<h1>{esc(titulo)}</h1>"
@@ -232,26 +291,40 @@ def paginas_fotos(album, titulo):
     itens = album["itens"]
     for idx, it in enumerate(itens):
         pag = caminho_foto(album, it)
+        zpag = caminho_zoom(album, it)
         grade = link_grade(pag, album, it["pagina_grade"])
-        ant = (f'<a href="{link(pag, caminho_foto(album, itens[idx - 1]))}">‹ Anterior</a>'
+        ampliar = link_pagina(pag, zpag)
+        ant = (f'<a href="{link_pagina(pag, caminho_foto(album, itens[idx - 1]))}">‹ Anterior</a>'
                if idx > 0 else "")
-        prox = (f'<a href="{link(pag, caminho_foto(album, itens[idx + 1]))}">Próxima ›</a>'
+        prox = (f'<a href="{link_pagina(pag, caminho_foto(album, itens[idx + 1]))}">Próxima ›</a>'
                 if idx < len(itens) - 1 else "")
         nav = f'<div class="nav">{ant}<a href="{grade}">Grade</a>{prox}</div>'
-        orig = link(pag, it["original"])
         corpo = (
             nav
-            + f'<div class="foto"><a href="{orig}"><img src="{link(pag, it["tela"])}" alt=""></a></div>'
+            + f'<div class="foto"><a href="{ampliar}"><img src="{link(pag, it["tela"])}" alt=""></a></div>'
             + f'<div class="info">{esc(titulo)} · {idx + 1} de {len(itens)}</div>'
-            + f'<div class="nav"><a href="{orig}">Original (resolução máxima)</a></div>'
+            + f'<div class="nav"><a href="{ampliar}">Ampliar</a></div>'
             + nav
+            + f'<p class="pequeno"><a href="{link(pag, it["original"])}">Arquivo original</a></p>'
         )
         escrever(pag, pagina_html(titulo, corpo))
+
+        img_zoom = it["zoom"] if it.get("tem_zoom") else it["tela"]
+        voltar = f'<div class="nav"><a href="{link_pagina(zpag, pag)}">‹ Voltar</a></div>'
+        escrever(zpag, pagina_html(
+            titulo, voltar + f'<div class="zoom"><img src="{link(zpag, img_zoom)}" alt=""></div>' + voltar))
 
 
 def main():
     SITE.mkdir(exist_ok=True)
     pastas = ler_pastas()
+
+    # se os ajustes mudaram, refaz todas as versões pra Kobo
+    marca = SITE / "mini" / ".ajustes"
+    ajustes = f"{SATURACAO}|{PRETOS}|{CONTRASTE}|{MINI}|{TELA}|{ZOOM}"
+    if not marca.exists() or marca.read_text() != ajustes:
+        for d in ("mini", "tela", "zoom"):
+            shutil.rmtree(SITE / d, ignore_errors=True)
 
     esperados = set()
     for p in pastas:
@@ -259,8 +332,10 @@ def main():
             ok = [it for it in album["itens"] if gerar_versoes(it)]
             album["itens"] = ok
             for it in ok:
-                esperados.update({it["mini"], it["tela"]})
-    for pasta in ("mini", "tela"):
+                esperados.update({it["mini"], it["tela"], it["zoom"]})
+    marca.parent.mkdir(parents=True, exist_ok=True)
+    marca.write_text(ajustes)
+    for pasta in ("mini", "tela", "zoom"):
         for f in (SITE / pasta).rglob("*.jpg") if (SITE / pasta).exists() else []:
             if f not in esperados:
                 f.unlink()
@@ -274,34 +349,33 @@ def main():
         p["total"] = len(todos)
     pastas = [p for p in pastas if p["total"]]
 
-    for d in ("p", "v"):
+    for d in ("p", "v", "z"):
         shutil.rmtree(SITE / d, ignore_errors=True)
 
     inicio = SITE / "index.html"
     for p in pastas:
         def topo_pasta(pag):
-            return f'<div class="topo"><a href="{link(pag, inicio.parent, pasta=True)}">‹ Pastas</a></div>'
+            return f'<div class="topo"><a href="{link_pagina(pag, inicio)}">‹ Pastas</a></div>'
 
         def secoes_html(pag, p=p):
             if not p["secoes"]:
                 return ""
-            return bloco_pastas(pag, p["secoes"],
-                                lambda s: link(pag, caminho_grade(s, 1).parent, pasta=True))
+            return bloco_pastas(pag, p["secoes"], lambda s: link_grade(pag, s, 1))
 
         paginar(p, p["nome"], topo_pasta, secoes_html)
         paginas_fotos(p, p["nome"])
 
         for s in p["secoes"]:
             def topo_secao(pag, p=p):
-                return (f'<div class="topo"><a href="{link(pag, inicio.parent, pasta=True)}">‹ Pastas</a>'
-                        f'<a href="{link(pag, caminho_grade(p, 1).parent, pasta=True)}">‹ {esc(p["nome"])}</a></div>')
+                return (f'<div class="topo"><a href="{link_pagina(pag, inicio)}">‹ Pastas</a>'
+                        f'<a href="{link_grade(pag, p, 1)}">‹ {esc(p["nome"])}</a></div>')
             titulo = f'{p["nome"]} › {s["nome"]}'
             paginar(s, titulo, topo_secao)
             paginas_fotos(s, titulo)
 
     ultima = RAIZ / "dados" / "ultima-atualizacao.txt"
     quando = ultima.read_text(encoding="utf-8").splitlines()[0] if ultima.exists() else ""
-    lista = (bloco_pastas(inicio, pastas, lambda p: link(inicio, caminho_grade(p, 1).parent, pasta=True))
+    lista = (bloco_pastas(inicio, pastas, lambda p: link_grade(inicio, p, 1))
              if pastas else '<p class="vazio">Nenhuma pasta ainda. Rode a atualização.</p>')
     corpo = (
         "<h1>Minhas pastas</h1>" + lista
