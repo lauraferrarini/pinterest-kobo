@@ -1,0 +1,6 @@
+# Coloque aqui o link de cada pasta do Pinterest, um por linha.
+# Pode ser o link curto (pin.it/...) ou o link completo (pinterest.com/usuario/pasta/).
+# Linhas que começam com # são ignoradas.
+# Pra tirar uma pasta do site, apague a linha e apague a pasta dela em site/fotos/.
+
+https://pin.it/5Q9gHzI1y
