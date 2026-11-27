@@ -1,16 +1,4 @@
-"""Gera o site leve (pra Kobo) a partir das fotos em site/fotos/.
-
-Estrutura esperada (criada pelo gallery-dl):
-    site/fotos/<Pasta>/<foto>
-    site/fotos/<Pasta>/<Seção>/<foto>
-
-O que é gerado:
-    site/index.html                 lista de pastas
-    site/p/<pasta>/...              grade de miniaturas (com páginas)
-    site/v/<pasta>/...              uma página por foto, com anterior/próxima
-    site/mini/..., site/tela/...    versões menores (JPEG) pra Kobo carregar rápido
-As fotos originais ficam intactas em site/fotos/ (link "Original" na página da foto).
-"""
+"""Gera o site leve (pra Kobo) a partir das fotos em site/fotos/."""
 import html
 import os
 import re
@@ -22,6 +10,12 @@ from urllib.parse import quote
 
 from PIL import Image, ImageOps
 
+try:  # fotos HEIC (formato do iPhone)
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass
+
 RAIZ = Path(__file__).resolve().parent.parent
 SITE = RAIZ / "site"
 FOTOS = SITE / "fotos"
@@ -29,7 +23,7 @@ FOTOS = SITE / "fotos"
 POR_PAGINA = 30                 # miniaturas por página da grade
 MINI = (360, 480)               # miniatura cortada em 3:4
 TELA = (1264, 1680)             # tela da Kobo Libra Colour
-EXTENSOES = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+EXTENSOES = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".heif"}
 
 CSS = """
 body{margin:0;padding:10px 12px 30px;background:#fff;color:#000;font-family:sans-serif;font-size:20px}
@@ -53,8 +47,6 @@ h1{font-size:26px;margin:8px 0 12px}
 """
 
 
-# ---------- utilidades ----------
-
 def slugify(texto):
     t = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode()
     t = re.sub(r"[^a-zA-Z0-9]+", "-", t).strip("-").lower()
@@ -71,22 +63,19 @@ def slug_unico(texto, usados):
 
 
 def chave_ordem(stem):
-    """Mais recente primeiro (id maior) e, dentro do mesmo pin, na ordem original."""
     partes = stem.split("_")
     try:
         pin = int(partes[0])
     except ValueError:
         pin = 0
-    resto = "_".join(partes[1:])
-    return (-pin, resto)
+    return (-pin, "_".join(partes[1:]))
 
 
 def pin_id(stem):
     return stem.split("_")[0]
 
 
-def link(de_pagina: Path, para: Path, pasta=False):
-    """Link relativo de uma página para outro arquivo, com acentos/espaços codificados."""
+def link(de_pagina, para, pasta=False):
     rel = os.path.relpath(para, de_pagina.parent).replace(os.sep, "/")
     rel = "/".join(quote(p) for p in rel.split("/"))
     if pasta:
@@ -107,16 +96,14 @@ def pagina_html(titulo, corpo):
     )
 
 
-def escrever(caminho: Path, texto):
+def escrever(caminho, texto):
     caminho.parent.mkdir(parents=True, exist_ok=True)
     caminho.write_text(texto, encoding="utf-8")
 
 
-# ---------- imagens menores ----------
-
 def abrir_rgb(origem):
     im = Image.open(origem)
-    im.seek(0)  # GIF animado: primeiro quadro
+    im.seek(0)
     im = ImageOps.exif_transpose(im)
     if im.mode in ("RGBA", "LA", "P"):
         im = im.convert("RGBA")
@@ -127,7 +114,6 @@ def abrir_rgb(origem):
 
 
 def gerar_versoes(item):
-    """Cria mini e tela se faltarem (ou se a original for mais nova). Devolve False se a foto não abre."""
     orig = item["original"]
     precisa = [d for d in (item["mini"], item["tela"])
                if not d.exists() or d.stat().st_mtime < orig.stat().st_mtime]
@@ -135,7 +121,7 @@ def gerar_versoes(item):
         return True
     try:
         im = abrir_rgb(orig)
-    except Exception as e:  # arquivo corrompido ou formato estranho
+    except Exception as e:
         print(f"  ignorando {orig.relative_to(SITE)}: {e}")
         return False
     if item["mini"] in precisa:
@@ -149,9 +135,7 @@ def gerar_versoes(item):
     return True
 
 
-# ---------- leitura das pastas ----------
-
-def ler_album(dir_fotos: Path, caminho_slug: str):
+def ler_album(dir_fotos, caminho_slug):
     itens = []
     for f in sorted(dir_fotos.iterdir()):
         if f.is_file() and f.suffix.lower() in EXTENSOES:
@@ -183,7 +167,6 @@ def ler_pastas():
                     secoes.append({"nome": s.name, "slug": sslug, "itens": itens,
                                    "url": f"{bslug}/{sslug}"})
         itens = ler_album(d, bslug)
-        # Se um pin aparece numa seção, não repete na grade principal da pasta.
         ids_secoes = {pin_id(i["stem"]) for sec in secoes for i in sec["itens"]}
         itens = [i for i in itens if pin_id(i["stem"]) not in ids_secoes]
         if itens or secoes:
@@ -191,8 +174,6 @@ def ler_pastas():
                            "secoes": secoes, "url": bslug})
     return pastas
 
-
-# ---------- páginas ----------
 
 def caminho_grade(album, n):
     base = SITE / "p" / album["url"]
@@ -209,7 +190,6 @@ def link_grade(de, album, n):
 
 
 def bloco_pastas(de, lista, url_de):
-    """Blocos grandes com capa, nome e quantidade (usado pra pastas e seções)."""
     partes = ['<div class="pastas">']
     for a in lista:
         capa = a["capa"]
@@ -223,7 +203,7 @@ def bloco_pastas(de, lista, url_de):
     return "".join(partes)
 
 
-def paginar(album, titulo, topo_html, extra_primeira=""):
+def paginar(album, titulo, topo_html, extra_primeira=None):
     itens = album["itens"]
     total_pag = max(1, -(-len(itens) // POR_PAGINA))
     for n in range(1, total_pag + 1):
@@ -273,7 +253,6 @@ def main():
     SITE.mkdir(exist_ok=True)
     pastas = ler_pastas()
 
-    # versões menores (só cria o que falta)
     esperados = set()
     for p in pastas:
         for album in [p] + p["secoes"]:
@@ -281,7 +260,6 @@ def main():
             album["itens"] = ok
             for it in ok:
                 esperados.update({it["mini"], it["tela"]})
-    # remove versões de fotos que não existem mais
     for pasta in ("mini", "tela"):
         for f in (SITE / pasta).rglob("*.jpg") if (SITE / pasta).exists() else []:
             if f not in esperados:
@@ -296,7 +274,6 @@ def main():
         p["total"] = len(todos)
     pastas = [p for p in pastas if p["total"]]
 
-    # páginas são refeitas do zero a cada vez
     for d in ("p", "v"):
         shutil.rmtree(SITE / d, ignore_errors=True)
 
@@ -322,7 +299,6 @@ def main():
             paginar(s, titulo, topo_secao)
             paginas_fotos(s, titulo)
 
-    # página inicial
     ultima = RAIZ / "dados" / "ultima-atualizacao.txt"
     quando = ultima.read_text(encoding="utf-8").splitlines()[0] if ultima.exists() else ""
     lista = (bloco_pastas(inicio, pastas, lambda p: link(inicio, caminho_grade(p, 1).parent, pasta=True))
